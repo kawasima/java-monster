@@ -23,7 +23,7 @@ public class ObjectShape {
             } else if (child instanceof TableNode) {
                 TableNode table = (TableNode) child;
                 PropertyMapping childProps = _defineObjectShape(node, prefixToPass, child);
-                if (node.isGrabMany()) {
+                if (table.isGrabMany()) {
                     propertyMapping.putToMany(table.getFieldName(), childProps);
                 } else {
                     propertyMapping.putToOne(table.getFieldName(), childProps);

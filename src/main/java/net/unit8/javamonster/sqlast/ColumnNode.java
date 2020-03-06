@@ -5,6 +5,7 @@ public class ColumnNode extends SQLASTNodeBase {
     private String name;
     private String fieldName;
     private String as;
+    private String fromOtherTable;
 
     public String getName() {
         return name;
@@ -30,5 +31,13 @@ public class ColumnNode extends SQLASTNodeBase {
 
     public void setAs(String as) {
         this.as = as;
+    }
+
+    public String getFromOtherTable() {
+        return fromOtherTable;
+    }
+
+    public void setFromOtherTable(String fromOtherTable) {
+        this.fromOtherTable = fromOtherTable;
     }
 }

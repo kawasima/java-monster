@@ -5,6 +5,11 @@ import java.util.stream.Collectors;
 
 public class H2Dialect implements Dialect {
     @Override
+    public String getName() {
+        return "h2";
+    }
+
+    @Override
     public String quote(String str) {
         return '"' + str + '"';
     }

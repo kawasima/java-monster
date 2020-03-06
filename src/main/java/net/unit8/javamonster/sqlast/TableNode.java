@@ -3,6 +3,7 @@ package net.unit8.javamonster.sqlast;
 import net.unit8.javamonster.OrderColumn;
 import net.unit8.javamonster.SQLJoinFunction;
 import net.unit8.javamonster.WhereFunction;
+import net.unit8.javamonster.queryast.SortKey;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -12,6 +13,7 @@ public class TableNode extends SQLASTNodeBase {
     private String fieldName;
     private String as;
     private List<OrderColumn> orderBy;
+    private SortKey sortKey;
     private boolean grabMany;
     private SQLJoinFunction sqlJoin;
     private boolean sqlBatch;
@@ -64,6 +66,14 @@ public class TableNode extends SQLASTNodeBase {
         this.orderBy = orderBy;
     }
 
+    public SortKey getSortKey() {
+        return sortKey;
+    }
+
+    public void setSortKey(SortKey sortKey) {
+        this.sortKey = sortKey;
+    }
+
     @Override
     public boolean isGrabMany() {
         return grabMany;
@@ -90,6 +100,10 @@ public class TableNode extends SQLASTNodeBase {
 
     public void setPaginate(boolean paginate) {
         this.paginate = paginate;
+    }
+
+    public boolean hasLimit() {
+        return limit != null;
     }
 
     public Integer getLimit() {

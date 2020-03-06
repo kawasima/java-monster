@@ -8,7 +8,10 @@ import graphql.ExecutionResult;
 import graphql.GraphQL;
 import graphql.Scalars;
 import graphql.relay.Relay;
-import graphql.schema.*;
+import graphql.schema.GraphQLCodeRegistry;
+import graphql.schema.GraphQLList;
+import graphql.schema.GraphQLObjectType;
+import graphql.schema.GraphQLSchema;
 import net.unit8.javamonster.jdbc.StandardJdbcDatabaseCallback;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
@@ -23,18 +26,17 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 
 import static graphql.schema.FieldCoordinates.coordinates;
-import static graphql.schema.GraphQLArgument.newArgument;
 import static graphql.schema.GraphQLFieldDefinition.newFieldDefinition;
-import static net.unit8.javamonster.ValueUtils.intValue;
+import static graphql.schema.GraphQLList.list;
+import static net.unit8.javamonster.SortDirection.ASC;
+import static net.unit8.javamonster.SortDirection.DESC;
 
-public class HogeTest {
+public class OrderByTest {
     private static final Logger LOG = LoggerFactory.getLogger(HogeTest.class);
-    private ObjectMapper mapper = new ObjectMapper();
-
     private DataSource dataSource;
+    private ObjectMapper mapper = new ObjectMapper();
 
     private HikariDataSource createDataSource() {
         HikariConfig hikariConfig = new HikariConfig();
@@ -46,7 +48,10 @@ public class HogeTest {
     @BeforeEach
     void setup() throws SQLException {
         dataSource = createDataSource();
-        final Flyway flyway = Flyway.configure().dataSource(dataSource).load();
+        final Flyway flyway = Flyway.configure()
+                .dataSource(dataSource)
+                .locations("classpath:db/migration/orderBy")
+                .load();
         flyway.migrate();
 
         try(Connection conn = dataSource.getConnection();
@@ -57,78 +62,62 @@ public class HogeTest {
             }
         }
     }
+
+    @Test
     public GraphQL createSchema() {
         DatabaseCallback<List<Map<String, Object>>> dbCall = new StandardJdbcDatabaseCallback(dataSource);
-        GraphQLObjectType userAddressType = GraphQLObjectType.newObject()
-                .name("UserAddress")
+        GraphQLObjectType commentType = GraphQLObjectType.newObject()
+                .name("Comment")
                 .field(newFieldDefinition()
-                        .name("address")
+                        .name("id")
+                        .type(Scalars.GraphQLID)
+                )
+                .field(newFieldDefinition()
+                        .name("body")
                         .type(Scalars.GraphQLString)
                 )
                 .build();
         GraphQLObjectType userType = GraphQLObjectType.newObject()
                 .name("User")
                 .field(newFieldDefinition()
-                        .name("name")
+                        .name("id")
+                        .type(Scalars.GraphQLID)
+                )
+                .field(newFieldDefinition()
+                        .name("email")
                         .type(Scalars.GraphQLString)
                 )
                 .field(newFieldDefinition()
-                        .name("user_addresses")
-                        .type(GraphQLList.list(userAddressType))
-                .argument(newArgument().name("gid").type(Scalars.GraphQLString)))
+                        .name("comments")
+                        .type(list(commentType))
+                )
                 .build();
-        GraphQLObjectType userConnectionType = new Relay().connectionType("User",
-                new Relay().edgeType("User", userType,
-                        null,
-                        List.of()),
-                List.of(
-                        // TODO Add total field.
-                ));
         GraphQLObjectType query = GraphQLObjectType.newObject()
                 .name("Query")
                 .field(newFieldDefinition()
                         .name("users")
-                        .argument(newArgument()
-                                .name("first")
-                                .type(Scalars.GraphQLBigInteger)
-                                .build())
-                        .type(userConnectionType)
+                        .type(list(userType))
                 )
-                .field(newFieldDefinition()
-                        .name("friend")
-                        .argument(newArgument()
-                                .name("id")
-                                .type(Scalars.GraphQLBigInteger)
-                                .build())
-                        .type(userType))
                 .build();
-        TypeResolver typeResolver = env -> null;
 
         GraphQLCodeRegistry codeRegistry = GraphQLCodeRegistry.newCodeRegistry()
                 .dataFetcher(coordinates("Query", "users"),
                         new JavaMonsterResolver.Builder<>()
-                                .sqlTable("user_table")
-                                .sqlPaginate(true)
-                                .orderBy(new OrderColumn("id"))
+                                .sqlTable("accounts")
                                 .dbCall(dbCall)
                                 .build())
-                .dataFetcher(coordinates("Query", "friend"),
+                .dataFetcher(coordinates("User", "comments"),
                         new JavaMonsterResolver.Builder<>()
-                                .sqlTable("user_table")
-                                .where((table, args, context) -> {
-                                    Optional<Integer> maybeId = intValue(args.get("id"));
-                                    return maybeId.map(id ->
-                                            table + ".id = " + id
-                                    ).orElse(null);
-                                })
-                                .dbCall(dbCall)
+                                .sqlJoin((userTable, commentTable, args, context) ->
+                                        userTable + ".id = " + commentTable + ".author_id")
+                                .orderBy(
+                                        new OrderColumn("body", ASC),
+                                        new OrderColumn("id", DESC)
+                                        )
                                 .build())
-                .dataFetcher(coordinates("User", "user_addresses"),
+                .dataFetcher(coordinates("User", "email"),
                         new JavaMonsterResolver.Builder<>()
-                                .sqlTable("user_address_table")
-                                .sqlJoin((userTable, userAddressTable, args, context) ->
-                                        userTable + ".id=" + userAddressTable + ".user_id"
-                                )
+                                .sqlColumn("email_address")
                                 .build())
                 .build();
         GraphQLSchema schema = GraphQLSchema.newSchema()
@@ -141,8 +130,8 @@ public class HogeTest {
     }
 
     @Test
-    void relayQuery() throws JsonProcessingException {
-        String graphQuery = "query { users(first:5) { edges { cursor node { name user_addresses { address }}}}}";
+    void orderBy() throws JsonProcessingException {
+        String graphQuery = "query { users { email comments { id body }}}";
         LOG.info("GraphQL Query={}", graphQuery);
         GraphQL graphql = createSchema();
         ExecutionResult result = graphql.execute(graphQuery);
@@ -152,22 +141,4 @@ public class HogeTest {
             LOG.info(mapper.writeValueAsString(result.toSpecification()));
         }
     }
-
-    @Test
-    void fragment() throws JsonProcessingException {
-        String graphQuery = "query { "
-                + " friend1: friend(id:1) { ...friendFields } "
-                + " friend2: friend(id:2) { ...friendFields } "
-                + " friend3: friend(id:3) { ...friendFields } "
-                + "} fragment friendFields on User { name user_addresses { address }} ";
-        LOG.info("GraphQL Query={}", graphQuery);
-        GraphQL graphql = createSchema();
-        ExecutionResult result = graphql.execute(graphQuery);
-        if (!result.getErrors().isEmpty()) {
-            LOG.warn("{}", result.getErrors());
-        } else {
-            LOG.info(mapper.writeValueAsString(result.toSpecification()));
-        }
-    }
-
 }

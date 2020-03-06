@@ -7,43 +7,56 @@ import graphql.schema.DataFetchingEnvironment;
 import graphql.schema.PropertyDataFetcherHelper;
 import net.unit8.hydration.NestHydration;
 import net.unit8.hydration.mapping.PropertyMapping;
+import net.unit8.javamonster.jdbc.StandardJdbcDatabaseCallback;
+import net.unit8.javamonster.queryast.Junction;
 import net.unit8.javamonster.queryast.SQLExprFunction;
+import net.unit8.javamonster.queryast.SortKey;
 import net.unit8.javamonster.queryast.ThunkWithArgsCtx;
+import net.unit8.javamonster.relay.RelayConnectionConverter;
 import net.unit8.javamonster.sqlast.SQLASTNode;
 import net.unit8.javamonster.stringifiers.SQLASTPrinter;
+import net.unit8.javamonster.stringifiers.dialects.Dialect;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.function.BiFunction;
 
 public class JavaMonsterResolver<T> implements DataFetcher<T> {
     private static final Logger LOG = LoggerFactory.getLogger(JavaMonsterResolver.class);
     private NestHydration nestHydration;
     private ObjectShape objectShape;
+    private RelayConnectionConverter relayConnectionConverter;
 
     private ThunkWithArgsCtx<String> sqlTable;
     private ThunkWithArgsCtx<List<OrderColumn>> orderBy;
+    private ThunkWithArgsCtx<SortKey> sortKey;
     private ThunkWithArgsCtx<Long> limit;
 
     private DatabaseCallback<T> databaseCallback;
-    private SQLASTPrinter sqlAstPrinter = new SQLASTPrinter();
+    private SQLASTPrinter sqlAstPrinter;
+    private Dialect dialect;
     private String sqlColumn;
     private SQLExprFunction sqlExprFunction;
     private SQLJoinFunction sqlJoin;
-    private Boolean sqlPaginate;
+    private Junction junction;
+    private boolean sqlPaginate;
 
     private WhereFunction where;
 
     private JavaMonsterResolver() {
         nestHydration = new NestHydration();
         objectShape = new ObjectShape();
+        relayConnectionConverter = new RelayConnectionConverter();
     }
 
     public String sqlTable(Map<String, Value> args, GraphQLContext context) {
-        return this.sqlTable.getValue(args, context);
+        return Optional.ofNullable(sqlTable)
+                .map(table -> table.getValue(args, context))
+                .orElse(null);
     }
 
     public String sqlColumn() {
@@ -58,11 +71,27 @@ public class JavaMonsterResolver<T> implements DataFetcher<T> {
         return this.sqlJoin;
     }
 
+
+    public boolean hasJunction() {
+        return this.junction != null;
+    }
+
+    public Junction getJunction() {
+        return this.junction;
+    }
+
     public boolean hasOrderBy() {
         return this.orderBy != null;
     }
     public ThunkWithArgsCtx<List<OrderColumn>> orderBy() {
         return this.orderBy;
+    }
+
+    public boolean hasWhere() {
+        return this.where != null;
+    }
+    public WhereFunction where() {
+        return this.where;
     }
 
     public SQLExprFunction sqlExpr() {
@@ -72,6 +101,7 @@ public class JavaMonsterResolver<T> implements DataFetcher<T> {
     public boolean isSQLPaginate() {
         return sqlPaginate;
     }
+
     @Override
     public T get(DataFetchingEnvironment environment) throws Exception {
         if (databaseCallback == null) {
@@ -86,7 +116,9 @@ public class JavaMonsterResolver<T> implements DataFetcher<T> {
         PropertyMapping propertyMapping = objectShape.defineObjectShape(sqlAST);
         LOG.info("sql={}", sql);
         T rows = databaseCallback.apply(sql);
-        return (T) nestHydration.nest((List<Map<String, Object>>) rows, propertyMapping);
+        T data = (T) nestHydration.nest((List<Map<String, Object>>) rows, propertyMapping);
+        data = (T) relayConnectionConverter.arrayToConnection(data, sqlAST);
+        return data;
     }
 
     public static class Builder<T> {
@@ -100,8 +132,14 @@ public class JavaMonsterResolver<T> implements DataFetcher<T> {
             resolver.sqlTable = new ThunkWithArgsCtx<>(sqlTableFunction);
             return this;
         }
+
         public Builder sqlTable(String sqlTable) {
             resolver.sqlTable = new ThunkWithArgsCtx<>(sqlTable);
+            return this;
+        }
+
+        public Builder where(WhereFunction where) {
+            resolver.where = where;
             return this;
         }
 
@@ -115,6 +153,11 @@ public class JavaMonsterResolver<T> implements DataFetcher<T> {
             return this;
         }
 
+        public Builder junction(Junction junction) {
+            resolver.junction = junction;
+            return this;
+        }
+
         public Builder orderBy(OrderColumn... orderColumn) {
             resolver.orderBy = new ThunkWithArgsCtx<>(Arrays.asList(orderColumn));
             return this;
@@ -122,6 +165,16 @@ public class JavaMonsterResolver<T> implements DataFetcher<T> {
 
         public Builder orderBy(BiFunction<Map<String, Value>, GraphQLContext, List<OrderColumn>> orderFunction) {
             resolver.orderBy = new ThunkWithArgsCtx<>(orderFunction);
+            return this;
+        }
+
+        public Builder sortKey(SortKey sortKey) {
+            resolver.sortKey = new ThunkWithArgsCtx<>(sortKey);
+            return this;
+        }
+
+        public Builder sortKey(BiFunction<Map<String, Value>, GraphQLContext, SortKey> sortKeyFunction) {
+            resolver.sortKey = new ThunkWithArgsCtx<>(sortKeyFunction);
             return this;
         }
 
@@ -135,12 +188,28 @@ public class JavaMonsterResolver<T> implements DataFetcher<T> {
             return this;
         }
 
+        public Builder limit(long limit) {
+            resolver.limit = new ThunkWithArgsCtx<>(limit);
+            return this;
+        }
+
+        public Builder limit(BiFunction<Map<String, Value>, GraphQLContext, Long> limitFunction) {
+            resolver.limit = new ThunkWithArgsCtx<>(limitFunction);
+            return this;
+        }
+
         public Builder dbCall(DatabaseCallback<T> callback) {
             resolver.databaseCallback = callback;
             return this;
         }
 
+        public Builder dialect(Dialect dialect) {
+            resolver.dialect = dialect;
+            return this;
+        }
+
         public JavaMonsterResolver<T> build() {
+            resolver.sqlAstPrinter = new SQLASTPrinter(resolver.dialect);
             return resolver;
         }
     }

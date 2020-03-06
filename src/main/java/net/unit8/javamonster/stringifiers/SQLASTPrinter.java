@@ -1,23 +1,35 @@
 package net.unit8.javamonster.stringifiers;
 
 import graphql.GraphQLContext;
+import graphql.language.IntValue;
 import net.unit8.javamonster.OrderColumn;
 import net.unit8.javamonster.sqlast.ColumnNode;
+import net.unit8.javamonster.sqlast.JunctionNode;
 import net.unit8.javamonster.sqlast.SQLASTNode;
 import net.unit8.javamonster.sqlast.TableNode;
 import net.unit8.javamonster.stringifiers.dialects.Dialect;
-import net.unit8.javamonster.stringifiers.dialects.H2Dialect;
+import net.unit8.javamonster.stringifiers.dialects.PostgresqlDialect;
 
+import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.stream.Collectors;
 
-public class SQLASTPrinter {
-    public String stringifySqlAST(SQLASTNode topNode, GraphQLContext context) {
-        Dialect dialect = new H2Dialect();
+import static java.util.Objects.nonNull;
 
+public class SQLASTPrinter {
+    private Dialect dialect;
+
+    public SQLASTPrinter(Dialect dialect) {
+        this.dialect = dialect;
+        if (this.dialect == null) {
+            this.dialect = new PostgresqlDialect();
+        }
+    }
+
+    public String stringifySqlAST(SQLASTNode topNode, GraphQLContext context) {
         SQLParts sqlParts = new SQLParts();
         _stringifySqlAST(null, topNode, new ArrayList<>(),
                 context, sqlParts, dialect);
@@ -60,7 +72,7 @@ public class SQLASTPrinter {
             }
         } else if (node instanceof ColumnNode){
             ColumnNode columnNode = (ColumnNode) node;
-            sqlParts.getSelections().add(dialect.quote(parentTable)
+            sqlParts.addSelection(dialect.quote(parentTable)
                     + "."
                     + dialect.quote(columnNode.getName())
                     + " AS "
@@ -74,50 +86,104 @@ public class SQLASTPrinter {
                      GraphQLContext context, SQLParts sqlParts) {
         // generate the "where" condition, if applicable
         if (whereConditionIsntSupposedTooInsideSubqueryOrOnNextBatch(node, parent)) {
-            if (Objects.nonNull(node.getWhere())) {
-                sqlParts.getWheres().add(
+            Optional.ofNullable(node.getJunction())
+                    .map(JunctionNode::getWhere)
+                    .ifPresent(where -> {
+                        sqlParts.addWhere(
+                                where.apply(dialect.quote(node.getJunction().getAs()),
+                                        node.getArgs(), context)
+                        );
+                    });
+            if (nonNull(node.getWhere())) {
+                sqlParts.addWhere(
                         node.getWhere().apply(node.getAs(), node.getArgs(), context));
             }
         }
 
         // order
         if (thisIsNotTheEndOfThisBatch(node, parent)) {
-            if (Objects.nonNull(node.getOrderBy())) {
-                // TODO order by
+            Optional.ofNullable(node.getJunction())
+                    .map(JunctionNode::getOrderBy)
+                    .filter(orderColumns -> !orderColumns.isEmpty())
+                    .ifPresent(orderColumns -> sqlParts
+                            .addOrder(
+                                    node.getJunction().getAs(),
+                                    node.getJunction().getOrderBy()
+                            )
+                    );
+            if (nonNull(node.getOrderBy()) && !node.getOrderBy().isEmpty()) {
+                sqlParts.addOrder(
+                        node.getAs(),
+                        node.getOrderBy()
+                );
             }
         }
 
-        if (Objects.nonNull(node.getSqlJoin())) {
+        if (nonNull(node.getSqlJoin())) {
+            // one-to-many using Join
             String joinCondition = node.getSqlJoin().apply(
                     parent.getAs(),
                     node.getAs(),
-                    node.getArgs());
+                    node.getArgs(),
+                    context);
 
             if (node.isPaginate()) {
-                // TODO handleJoinedOneToManyPaginated
-            } else if (Objects.nonNull(node.getLimit())) {
+                Optional.ofNullable(dialect.handleJoinedOneToManyPaginated(parent, node, context, joinCondition))
+                        .ifPresent(sqlParts::addTable);
+            } else if (nonNull(node.getLimit())) {
                 // TODO handleJoinedOntToManyPaginated
             } else {
-                sqlParts.getTables().add(
+                sqlParts.addTable(
                         "LEFT JOIN " + node.getName() +
                                 " " + node.getAs() +
                                 " ON " + joinCondition
                 );
             }
+        } else if (Optional.ofNullable(node.getJunction()).map(JunctionNode::getSqlTable).isPresent()) {
+            // many-to-many using JOIN
+            String inboundJoin = node.getJunction().getInboundJoin().apply(
+                    dialect.quote(parent.getAs()),
+                    dialect.quote(node.getJunction().getAs()),
+                    node.getArgs(),
+                    context);
+            String outboundJoin = node.getJunction().getOutboundJoin().apply(
+                    dialect.quote(node.getJunction().getAs()),
+                    dialect.quote(node.getAs()),
+                    node.getArgs(),
+                    context);
+
+            if (node.isPaginate()) {
+                sqlParts.addTable(dialect.handleJoinedManyToManyPaginated(parent, node, context,
+                        inboundJoin, outboundJoin));
+            } else if (node.hasLimit()) {
+                node.getArgs().put("first", new IntValue(BigInteger.valueOf(node.getLimit().longValue())));
+                sqlParts.addTable(dialect.handleJoinedManyToManyPaginated(parent, node, context,
+                        inboundJoin, outboundJoin));
+            } else {
+                sqlParts.addTable("LEFT JOIN " + node.getJunction().getSqlTable()
+                        + " " + dialect.quote(node.getJunction().getAs())
+                        + " ON " + inboundJoin);
+            }
+            sqlParts.addTable("LEFT JOIN " + node.getName()
+                    + " " + dialect.quote(node.getAs())
+                    + " ON " + outboundJoin);
+        } else if (node.isPaginate()) {
+            // otherwise, we aren't joining, so we are at the "root", and this is the start of the From clause
+            sqlParts.addTable(dialect.handlePaginationAtRoot(parent, node, context));
         } else {
-            sqlParts.getTables().add("FROM " + node.getName() + " " + node.getAs());
+            sqlParts.addTable("FROM " + node.getName() + " " + node.getAs());
         }
 
     }
 
     private boolean whereConditionIsntSupposedTooInsideSubqueryOrOnNextBatch(TableNode node, SQLASTNode parent) {
         return !node.isPaginate()
-                && (!(node.isSqlBatch()|| Optional.ofNullable(node.getJunction()).map(j -> j.isSqlBatch()).orElse(false))
+                && (!(node.isSqlBatch()|| Optional.ofNullable(node.getJunction()).map(JunctionNode::isSQLBatch).orElse(false))
                 || parent != null);
     }
 
     private boolean thisIsNotTheEndOfThisBatch(TableNode node, SQLASTNode parent) {
-        return (!node.isSqlBatch() && !(Optional.ofNullable(node.getJunction()).map(j->j.isSqlBatch()).orElse(false))) || parent != null;
+        return (!node.isSqlBatch() && !(Optional.ofNullable(node.getJunction()).map(JunctionNode::isSQLBatch).orElse(false))) || parent != null;
     }
 
     private String stringifyOuterOrder(List<SQLOrderParts> orders, Dialect dialect) {
@@ -139,23 +205,6 @@ public class SQLASTPrinter {
                 .skip(1)
                 .map(name -> name + "__")
                 .collect(Collectors.joining());
-    }
-
-    private static class SQLOrderParts {
-        private String table;
-        private List<OrderColumn> orderColumns;
-
-        public SQLOrderParts(String table, List<OrderColumn> orderColumns) {
-            this.table = table;
-            this.orderColumns = orderColumns;
-        }
-
-        public String getTable() {
-            return table;
-        }
-        public List<OrderColumn> orderColumns() {
-            return orderColumns;
-        }
     }
 
     private static class SQLParts {
@@ -185,6 +234,22 @@ public class SQLASTPrinter {
 
         public List<SQLOrderParts> getOrders() {
             return orders;
+        }
+
+        public void addTable(String table) {
+            tables.add(table);
+        }
+
+        public void addWhere(String where) {
+            wheres.add(where);
+        }
+
+        public void addSelection(String selection) {
+            selections.add(selection);
+        }
+
+        public void addOrder(String table, List<OrderColumn> orderColumns) {
+            orders.add(new SQLOrderParts(table, orderColumns));
         }
     }
 }
